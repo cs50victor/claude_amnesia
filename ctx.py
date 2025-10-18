@@ -102,10 +102,9 @@ class Config(BaseModel):
 
 class ContextInjector:
     def __init__(self, config_path: str = CONFIG_FILE):
-        api_key = os.environ.get("CEREBRAS_API_KEY")
-        if not api_key:
+        if not (api_key := os.environ.get("CEREBRAS_API_KEY")):
             raise ValueError("CEREBRAS_API_KEY not set")
-            
+
         self.client = OpenAI(
             base_url=self.config.cerebras.base_url,
             api_key=api_key,
