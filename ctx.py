@@ -12,6 +12,7 @@ Context Injector Hook for Claude Code
 Intelligently selects and injects plugin context using Cerebras inference
 """
 
+import asyncio
 import json
 import os
 import sys
@@ -421,6 +422,56 @@ Key principles to follow:
         return f"<relevant-context>\n\n{context}\n\n</relevant-context>\n\n"
 
 
+async def get_file_info(filepath: str, is_deleted: bool) -> Dict[str, Any]:
+    if is_deleted:
+        return {"file": filepath, "mtime": 0, "display": "X"}
+    try:
+        stat_result = await asyncio.to_thread(Path(filepath).stat)
+        return {
+            "file": filepath,
+            "mtime": stat_result.st_mtime,
+            "display": datetime.fromtimestamp(stat_result.st_mtime).isoformat()
+        }
+    except (FileNotFoundError, PermissionError):
+        return {"file": filepath, "mtime": 0, "display": "X"}
+
+
+async def get_git_status_with_mtimes() -> str:
+    try:
+        proc = await asyncio.create_subprocess_shell(
+            "git status -s",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await proc.communicate()
+
+        if proc.returncode != 0 or not stdout:
+            return ""
+
+        file_tasks = []
+        for line in stdout.decode().strip().split('\n'):
+            if len(line) < 4:
+                continue
+            status = line[:2]
+            filepath = line[3:].strip()
+            if ' -> ' in filepath:
+                filepath = filepath.split(' -> ')[1]
+            is_deleted = 'D' in status
+            file_tasks.append(get_file_info(filepath, is_deleted))
+
+        if not file_tasks:
+            return ""
+
+        results = await asyncio.gather(*file_tasks)
+        output = ["<git-status>", "Files with last modified time (X = deleted):"]
+        for item in sorted(results, key=lambda x: x["mtime"], reverse=True):
+            output.append(f"{item['file']}: {item['display']}")
+        output.append("</git-status>")
+
+        return "\n".join(output)
+    except Exception:
+        return ""
+
 def get_timestamp_metadata() -> str:
     utc_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     local_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S %Z")
@@ -429,6 +480,14 @@ def get_timestamp_metadata() -> str:
 
 def handle_user_prompt_submit(user_input: str) -> str:
     output = [get_timestamp_metadata(), "\n"]
+
+    try:
+        git_status = asyncio.run(get_git_status_with_mtimes())
+        if git_status:
+            output.append(git_status)
+            output.append("\n")
+    except Exception:
+        pass
 
     try:
         hook_data = json.loads(user_input)
