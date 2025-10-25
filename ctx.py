@@ -21,7 +21,7 @@ import time
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from datetime import datetime
+from datetime import datetime, UTC
 
 import yaml
 from openai import OpenAI
@@ -106,13 +106,13 @@ class ContextInjector:
         if not (api_key := os.environ.get("CEREBRAS_API_KEY")):
             raise ValueError("CEREBRAS_API_KEY not set")
 
+        self.config_path = Path(config_path).expanduser()
+        self.config = Config.from_yaml(self.config_path)
         self.client = OpenAI(
             base_url=self.config.cerebras.base_url,
             api_key=api_key,
             timeout=self.config.cerebras.timeout,
         )
-        self.config_path = Path(config_path).expanduser()
-        self.config = Config.from_yaml(self.config_path)
         self.cache_dir = Path(self.config.cache.directory).expanduser()
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.catalog_path = Path(self.config.catalog.file_path).expanduser()
@@ -450,10 +450,10 @@ async def get_git_status_with_mtimes() -> str:
 
         file_tasks = []
         for line in stdout.decode().strip().split('\n'):
-            if len(line) < 4:
+            if len(line) < 3:
                 continue
             status = line[:2]
-            filepath = line[3:].strip()
+            filepath = line[2:].strip()
             if ' -> ' in filepath:
                 filepath = filepath.split(' -> ')[1]
             is_deleted = 'D' in status
@@ -469,11 +469,15 @@ async def get_git_status_with_mtimes() -> str:
         output.append("</git-status>")
 
         return "\n".join(output)
-    except Exception:
+    except Exception as e:
+        log_path = Path(LOCAL_ERROR_LOGFILE).expanduser()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a") as f:
+            f.write(f"[{datetime.now().isoformat()}] Git status error: {e}\n")
         return ""
 
 def get_timestamp_metadata() -> str:
-    utc_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    utc_time = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
     local_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S %Z")
     return f"<metadata>\n  <utc_timestamp>{utc_time}</utc_timestamp>\n  <local_timestamp>{local_time}</local_timestamp>\n</metadata>"
 
@@ -605,9 +609,9 @@ def main():
     start_time = time.time()
     try:
         hook_type = os.environ.get("CLAUDE_CODE_HOOK_TYPE", "UserPromptSubmit")
-
+        user_input = sys.stdin.read()
+        
         try:
-            user_input = sys.stdin.read()
             data = json.loads(user_input)
             hook_event_name = data.get("hook_event_name")
             
@@ -629,14 +633,13 @@ def main():
             with open(log_path, "a") as f:
                 f.write(f"[{datetime.now().isoformat()}] Execution time: {elapsed:.3f}s\n")
 
-        sys.exit(0)
-
     except Exception as e:
         log_path = Path(LOCAL_ERROR_LOGFILE).expanduser()
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with open(log_path, "a") as f:
             f.write(f"[{datetime.now().isoformat()}] Hook error: {e}\n")
-        sys.exit(0)
+    
+    sys.exit(0)
 
 if __name__ == "__main__":
     main()
