@@ -1,6 +1,6 @@
-# claude code context engine with continuous learning
+# memory framework for claude code 
 
-> online reinforcement learning implementation for Claude Code. combines agentic context engineering with continuous learning capabilities.
+> Give me six hours to chop down a tree, and I will spend the first four sharpening the axe
 
 ## Installation
 
