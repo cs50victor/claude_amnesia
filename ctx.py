@@ -28,6 +28,7 @@ from openai import OpenAI
 from pydantic import BaseModel, Field
 
 VERSION = "0.1.0"
+PAUSE = os.getenv("PAUSE_AMNESIA_CLAUDE_HOOK", "False").lower() in ("true", "1", "t")
 # .........
 AMNESIA_DIRECTORY = "~/.amnesia"
 REPO_URL = "https://api.github.com/repos/cs50victor/claude_amnesia/releases/latest"
@@ -477,9 +478,81 @@ async def get_git_status_with_mtimes() -> str:
         return ""
 
 def get_timestamp_metadata() -> str:
-    utc_time = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
-    local_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S %Z")
-    return f"<metadata>\n  <utc_timestamp>{utc_time}</utc_timestamp>\n  <local_timestamp>{local_time}</local_timestamp>\n</metadata>"
+    local_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S %A")
+    return f"<metadata>\n  <local_timestamp>{local_time}</local_timestamp>\n</metadata>"
+
+
+def enhance_user_message(message: str, cwd: str) -> str:
+    """
+    Use Claude Code binary to enhance user message with anti-convergence techniques.
+    Falls back to original message on any error.
+    """
+    try:
+        import subprocess
+
+        model = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5")  # https://www.anthropic.com/news/claude-haiku-4-5
+
+        system_prompt = """You are an anti-convergence analyzer. Your job is to determine if a user message would benefit from anti-convergence enhancement.
+
+BACKGROUND: LLMs suffer from distributional convergence (mode collapse) where RLHF alignment causes them to default to high-probability, generic outputs, obscuring deeper latent capabilities.
+
+TECHNIQUES TO APPLY:
+
+1. VERBALIZED SAMPLING (creative/exploratory tasks):
+   Add: "Generate 3-5 diverse approaches with probabilities"
+   When: brainstorming, design, multiple solutions
+
+2. ANTI-GENERIC (depth/expertise tasks):
+   Add: "Go beyond the basics - include edge cases and non-obvious alternatives"
+   When: technical depth needed, avoiding typical solutions
+
+3. METACOGNITIVE (complex reasoning):
+   Add: "First analyze, then critique your analysis, consider alternatives, assess confidence, synthesize"
+   When: debugging, architecture, multi-faceted problems
+
+RULES:
+- Simple/specific messages -> return "ORIGINAL"
+- Messages needing diversity/depth -> return enhanced version
+- Keep user intent and tone, just add anti-convergence framing
+- Be concise
+
+OUTPUT: Enhanced message text, or "ORIGINAL" if no enhancement needed."""
+
+        prompt = f"User message (cwd: {cwd}):\n{message}"
+
+        result = subprocess.run(
+            [
+                "/opt/homebrew/bin/claude",
+                "--print",
+                "--output-format", "json",
+                "--model", model,
+                "--system-prompt", system_prompt,
+                "--dangerously-skip-permissions",
+                "--tools", ""
+            ],
+            input=prompt,
+            capture_output=True,
+            text=True,
+            timeout=45
+        )
+
+        if result.returncode != 0:
+            return message
+
+        response_data = json.loads(result.stdout)
+        enhanced = response_data.get("result", "").strip()
+
+        if not enhanced or enhanced == "ORIGINAL" or "ORIGINAL" in enhanced[:20]:
+            return message
+
+        return enhanced
+
+    except Exception as e:
+        log_path = Path(LOCAL_ERROR_LOGFILE).expanduser()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a") as f:
+            f.write(f"[{datetime.now().isoformat()}] Anti-convergence enhancement error: {e}\n")
+        return message
 
 
 def handle_user_prompt_submit(user_input: str) -> str:
@@ -496,10 +569,22 @@ def handle_user_prompt_submit(user_input: str) -> str:
     try:
         hook_data = json.loads(user_input)
         user_message = hook_data.get("prompt", "")
+        cwd = hook_data.get("cwd", os.getcwd())
     except (json.JSONDecodeError, ValueError):
         user_message = user_input
+        cwd = os.getcwd()
 
-    if user_message:
+    if user_message and not PAUSE:
+        try:
+            enhanced_message = enhance_user_message(user_message, cwd)
+            if enhanced_message != user_message:
+                output.append(f"<anti-convergence-guidance>\n{enhanced_message}\n</anti-convergence-guidance>\n\n")
+        except Exception as e:
+            log_path = Path(LOCAL_ERROR_LOGFILE).expanduser()
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(log_path, "a") as f:
+                f.write(f"[{datetime.now().isoformat()}] Anti-convergence enhancement error: {e}\n")
+
         try:
             context = ContextInjector().run(user_message)
             if context:
@@ -592,7 +677,7 @@ def handle_session_start(user_input: str) -> str:
     return "".join(output)
 
 
-def handle_post_tool_use() -> str:
+def handle_post_tool_use(user_input: str) -> str:
     metadata = get_timestamp_metadata()
 
     return json.dumps(
@@ -621,7 +706,7 @@ def main():
             pass
 
         if hook_type == "PostToolUse":
-            print(handle_post_tool_use())
+            print(handle_post_tool_use(user_input))
         elif hook_type == "SessionStart":
             print(handle_session_start(user_input), end="")
         else:
