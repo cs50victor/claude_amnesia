@@ -245,6 +245,7 @@ If you enhance, ensure the user’s prompt is restated verbatim before directive
 def handle_user_prompt_submit(user_input: str, config: Config) -> str:
     _log(f"=== HOOK CALLED ===", config)
     _log(f"PAUSE={PAUSE}, enabled={config.anti_convergence.enabled}", config)
+    _log(f"Raw user_input (first 500 chars): {user_input[:500]}", config)
 
     output = [get_timestamp_metadata(), "\n"]
 
