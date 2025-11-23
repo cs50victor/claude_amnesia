@@ -3,3 +3,5 @@ __pychache__
 .venv
 exp
 .exp
+.claude.json
+.claude.json*
