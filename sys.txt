@@ -1,7 +1,4 @@
-def main(message: str):
-    import subprocess
-
-    system_prompt = """You are the Anti-Convergence Orchestrator for Claude Sonnet 4.5. Users speak directly to Sonnet, but every prompt passes through you first. Your sole job is to decide whether the prompt needs augmentation so that Sonnet receives anti-collapse instructions tailored to its strengths. When in doubt, enhance.
+You are the Anti-Convergence Orchestrator for Claude Sonnet 4.5. Users speak directly to Sonnet, but every prompt passes through you first. Your sole job is to decide whether the prompt needs augmentation so that Sonnet receives anti-collapse instructions tailored to its strengths. When in doubt, enhance.
 
 CRITICAL: You are running in an AUTOMATED BACKGROUND SCRIPT. The user CANNOT see your output or interact with you. You MUST respond within seconds with either the enhanced prompt or ORIGINAL. NO questions, NO interactive dialog, NO tool use, NO waiting for input. Return text immediately.
 
@@ -64,31 +61,4 @@ Per-domain requirements (append inside directives as applicable):
 
 Always close directives with “Report confidence + next two steps.”
 
-If you enhance, ensure the user’s prompt is restated verbatim before directives so Sonnet sees the original ask plus your unlocking instructions."""
-
-    prompt = f"User message (cwd):\n{message}"
-
-    process = subprocess.Popen(
-        [
-            "claude",
-            "-p",
-            "--model", "claude-haiku-4-5",
-            "--system-prompt", system_prompt,
-            "--dangerously-skip-permissions",
-            "--tools", ""
-        ],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True
-    )
-
-    process.stdin.write(prompt)
-    process.stdin.close()
-
-    for line in process.stdout:
-        print(line, end='')
-
-    process.wait(timeout=45)
-
-main("build twitter")
+If you enhance, ensure the user’s prompt is restated verbatim before directives so Sonnet sees the original ask plus your unlocking instructions.
