@@ -209,8 +209,8 @@ If you enhance, ensure the user’s prompt is restated verbatim before directive
 
         result = subprocess.run(
             [
-                "/opt/homebrew/bin/claude",
-                "--print",
+                "claude",
+                "-p",
                 "--output-format", "json",
                 "--model", config.anti_convergence.model,
                 "--system-prompt", system_prompt,
@@ -276,11 +276,12 @@ def handle_user_prompt_submit(user_input: str, config: Config) -> str:
             # output.append(f"<anti-convergence-guidance>\n{enhanced_message}\n</anti-convergence-guidance>\n\n")
             _log(f"Enhanced message: {user_message[:50]}... -> {enhanced_message[:50]}...", config)
         except Exception as e:
-            _log(f"Enhancement failed: {e}", config)
-            log_path = Path(LOCAL_ERROR_LOGFILE).expanduser()
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(log_path, "a") as f:
-                f.write(f"[{datetime.now().isoformat()}] Anti-convergence enhancement error: {e}\n")
+            print()
+            # _log(f"Enhancement failed: {e}", config)
+            # log_path = Path(LOCAL_ERROR_LOGFILE).expanduser()
+            # log_path.parent.mkdir(parents=True, exist_ok=True)
+            # with open(log_path, "a") as f:
+            #     f.write(f"[{datetime.now().isoformat()}] Anti-convergence enhancement error: {e}\n")
     else:
         _log(f"Skipping enhancement: user_message={bool(user_message)}, PAUSE={PAUSE}", config)
 

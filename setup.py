@@ -18,6 +18,7 @@ CLAUDE_SETTINGS_DIR = "~/.claude"
 CLAUDE_SETTINGS_FILE = "~/.claude/settings.json"
 RAW_FILE_URL = "https://raw.githubusercontent.com/cs50victor/claude_amnesia/main/ctx.py"
 
+
 def install_ctx_file():
     target_dir = Path(AMNESIA_DIRECTORY).expanduser()
     target_file = target_dir / "ctx.py"
@@ -53,6 +54,7 @@ def install_ctx_file():
 
     return target_file
 
+
 def setup_claude_hooks(ctx_file_path: Path):
     settings_file = Path(CLAUDE_SETTINGS_FILE).expanduser()
     settings_dir = Path(CLAUDE_SETTINGS_DIR).expanduser()
@@ -62,7 +64,7 @@ def setup_claude_hooks(ctx_file_path: Path):
 
     response = input("\nproceed with hook installation? (y/n): ").strip().lower()
 
-    if response not in ('y', 'yes'):
+    if response not in ("y", "yes"):
         console.print("skipping hook installation", style="yellow")
         return False
 
@@ -74,7 +76,7 @@ def setup_claude_hooks(ctx_file_path: Path):
     if settings_file.exists():
         console.print(f"reading existing settings from: {settings_file}", style="dim")
         try:
-            with open(settings_file, 'r') as f:
+            with open(settings_file, "r") as f:
                 settings = json.load(f)
         except json.JSONDecodeError as e:
             console.print(f"error parsing existing settings: {e}", style="bold red")
@@ -87,14 +89,7 @@ def setup_claude_hooks(ctx_file_path: Path):
     if "hooks" not in settings:
         settings["hooks"] = {}
 
-    hook_config = {
-        "hooks": [
-            {
-                "type": "command",
-                "command": str(ctx_file_path)
-            }
-        ]
-    }
+    hook_config = {"hooks": [{"type": "command", "command": str(ctx_file_path)}]}
 
     hooks_to_add = ["UserPromptSubmit", "PostToolUse"]
 
@@ -115,16 +110,17 @@ def setup_claude_hooks(ctx_file_path: Path):
                 console.print(f"appending hook to {hook_name}", style="green")
                 settings["hooks"][hook_name].append(hook_config)
 
-    temp_file = settings_file.with_suffix('.tmp')
+    temp_file = settings_file.with_suffix(".tmp")
     console.print(f"writing settings to temporary file", style="dim")
 
-    with open(temp_file, 'w') as f:
+    with open(temp_file, "w") as f:
         json.dump(settings, f, indent=2)
 
     temp_file.replace(settings_file)
     console.print(f"successfully updated: {settings_file}", style="bold green")
 
     return True
+
 
 def setup_amnesia():
     ctx_file = install_ctx_file()
@@ -137,9 +133,12 @@ def setup_amnesia():
         console.print("restart claude code to activate hooks", style="yellow")
     else:
         console.print("\nctx.py installed but hooks not configured", style="yellow")
-        console.print(f"you can manually add {ctx_file} to your hooks later", style="dim")
+        console.print(
+            f"you can manually add {ctx_file} to your hooks later", style="dim"
+        )
 
     return 0
+
 
 if __name__ == "__main__":
     try:
@@ -149,5 +148,8 @@ if __name__ == "__main__":
         sys.exit(130)
     except Exception as e:
         console.print(f"error: {e}", style="bold red")
-        console.print("please file an issue: https://github.com/cs50victor/claude_amnesia/issues", style="dim")
+        console.print(
+            "please file an issue: https://github.com/cs50victor/claude_amnesia/issues",
+            style="dim",
+        )
         sys.exit(1)
