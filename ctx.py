@@ -2,95 +2,53 @@
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
-#   "openai>=1.0.0",
 #   "pyyaml>=6.0",
 #   "pydantic>=2.0.0",
 # ]
 # ///
 """
-Context Injector Hook for Claude Code
-Intelligently selects and injects plugin context using Cerebras inference
+Anti-Convergence Hook for Claude Code
+Enhances user prompts to overcome distributional convergence (mode collapse)
 """
 
 import asyncio
 import json
 import os
 import sys
-import hashlib
 import time
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-from datetime import datetime, UTC
+from typing import Any, Dict
+from datetime import datetime
 
 import yaml
-from openai import OpenAI
 from pydantic import BaseModel, Field
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 PAUSE = os.getenv("PAUSE_AMNESIA_CLAUDE_HOOK", "False").lower() in ("true", "1", "t")
-# .........
 AMNESIA_DIRECTORY = "~/.amnesia"
 REPO_URL = "https://api.github.com/repos/cs50victor/claude_amnesia/releases/latest"
 RAW_FILE_URL = "https://raw.githubusercontent.com/cs50victor/claude_amnesia/main/ctx.py"
-# .........
 CONFIG_FILE = f"{AMNESIA_DIRECTORY}/config.yaml"
 LOCAL_ERROR_LOGFILE = f"{AMNESIA_DIRECTORY}/error.log"
 TRACE_LOG_FILE = f"{AMNESIA_DIRECTORY}/trace.log"
 CACHE_DIR = f"{AMNESIA_DIRECTORY}/cache"
-# .........
-CLAUDE_HISTORY_FILE = "~/.claude/history.jsonl"
-AUTO_UPDATE_INTERVAL  = 86400
+AUTO_UPDATE_INTERVAL = 86400
 
-class HistoryConfig(BaseModel):
-    window_size: int = Field(default=5)
-    max_tokens_per_message: int = Field(default=500)
-    pattern_analysis_window: int = Field(default=100)
-    pattern_refresh_interval: int = Field(default=3600)
 
-class PluginsConfig(BaseModel):
-    max_selected: int = Field(default=3)
-    excerpt_tokens: int = Field(default=300)
-    full_content_tokens: int = Field(default=4000)
-    directories: List[str] = Field(default_factory=lambda: [
-        "~/.claude/plugins/marketplaces/claude-code-workflows/agents",
-        "~/.claude/plugins/marketplaces/claude-code-workflows/workflows",
-        "~/.claude/plugins/marketplaces/claude-code-workflows/tools",
-        "~/.claude/plugins/marketplaces/claude-code-plugins/plugins",
-    ])
-
-class CerebrasConfig(BaseModel):
-    model: str = Field(default="qwen-3-32b")
-    base_url: str = Field(default="https://api.cerebras.ai/v1")
-    temperature: float = Field(default=0.6)
-    max_tokens: int = Field(default=2000)
-    timeout: int = Field(default=30)
-
-class CacheConfig(BaseModel):
-    enabled: bool = Field(default=False)
-    directory: str = Field(default=f"{CACHE_DIR}")
-
-class CatalogConfig(BaseModel):
-    rebuild_interval_seconds: int = Field(default=86400)
-    file_path: str = Field(default=f"{CACHE_DIR}/plugin_catalog.json")
-
-class PatternsConfig(BaseModel):
+class AntiConvergenceConfig(BaseModel):
+    model: str = Field(default="claude-haiku-4-5")
+    timeout: int = Field(default=45)
     enabled: bool = Field(default=True)
-    cache_file: str = Field(default=f"{CACHE_DIR}/detected_patterns.json")
-    min_occurrences: int = Field(default=2)
-    max_patterns: int = Field(default=10)
+
 
 class DebugConfig(BaseModel):
     enabled: bool = Field(default=True)
     log_file: str = Field(default=TRACE_LOG_FILE)
 
+
 class Config(BaseModel):
-    history: HistoryConfig = Field(default_factory=HistoryConfig)
-    plugins: PluginsConfig = Field(default_factory=PluginsConfig)
-    cerebras: CerebrasConfig = Field(default_factory=CerebrasConfig)
-    cache: CacheConfig = Field(default_factory=CacheConfig)
-    catalog: CatalogConfig = Field(default_factory=CatalogConfig)
-    patterns: PatternsConfig = Field(default_factory=PatternsConfig)
+    anti_convergence: AntiConvergenceConfig = Field(default_factory=AntiConvergenceConfig)
     debug: DebugConfig = Field(default_factory=DebugConfig)
 
     @classmethod
@@ -102,325 +60,13 @@ class Config(BaseModel):
         except Exception:
             return cls()
 
-class ContextInjector:
-    def __init__(self, config_path: str = CONFIG_FILE):
-        if not (api_key := os.environ.get("CEREBRAS_API_KEY")):
-            raise ValueError("CEREBRAS_API_KEY not set")
 
-        self.config_path = Path(config_path).expanduser()
-        self.config = Config.from_yaml(self.config_path)
-        self.client = OpenAI(
-            base_url=self.config.cerebras.base_url,
-            api_key=api_key,
-            timeout=self.config.cerebras.timeout,
-        )
-        self.cache_dir = Path(self.config.cache.directory).expanduser()
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self.catalog_path = Path(self.config.catalog.file_path).expanduser()
-
-    def _log(self, message: str):
-        if self.config.debug.enabled:
-            log_file = Path(self.config.debug.log_file).expanduser()
-            log_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(log_file, "a") as f:
-                f.write(f"[{datetime.now().isoformat()}] {message}\n")
-
-    def _extract_plugin_excerpt(self, file_path: Path, max_tokens: int = 300) -> Optional[Dict[str, str]]:
-        try:
-            content = file_path.read_text()
-            lines = content.split("\n")
-
-            frontmatter = {}
-            # plugin md file yml
-            if lines[0].strip() == "---":
-                end_idx = 1
-                while end_idx < len(lines) and lines[end_idx].strip() != "---":
-                    end_idx += 1
-                frontmatter_lines = lines[1:end_idx]
-                for line in frontmatter_lines:
-                    if ":" in line:
-                        key, val = line.split(":", 1)
-                        frontmatter[key.strip()] = val.strip()
-                lines = lines[end_idx + 1 :]
-
-            excerpt_lines = []
-            char_count = 0
-            max_chars = max_tokens * 4  # Rough estimate
-
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-                if line.startswith("#"):
-                    excerpt_lines.append(line)
-                elif line.startswith("-") or line.startswith("*"):
-                    excerpt_lines.append(line)
-                else:
-                    excerpt_lines.append(line)
-
-                char_count += len(line)
-                if char_count > max_chars:
-                    break
-
-            excerpt = "\n".join(excerpt_lines[:50])
-
-            type = "unknown"
-            parts = file_path.parts
-            if "commands" in parts:
-                type = "command"
-            if "agents" in parts:
-                type = "agent"
-            if "workflows" in parts:
-                type = "workflow"
-            if "tools" in parts:
-                type = "tool"
-            return {
-                "name": frontmatter.get("name", file_path.stem),
-                "description": frontmatter.get("description", ""),
-                "excerpt": excerpt[:max_chars],
-                "path": str(file_path),
-                "type": type,
-            }
-        except Exception as e:
-            self._log(f"Error extracting from {file_path}: {e}")
-            return None
-
-    def _build_plugin_catalog(self) -> List[Dict[str, Any]]:
-        self._log("Building plugin catalog...")
-        catalog = []
-
-        for dir_path in self.config.plugins.directories:
-            dir_path = Path(dir_path).expanduser()
-            if not dir_path.exists():
-                continue
-
-            for md_file in dir_path.rglob("*.md"):
-                if md_file.name in ["README.md", "CHANGELOG.md", "LICENSE.md"]:
-                    continue
-
-                excerpt_data = self._extract_plugin_excerpt(
-                    md_file, self.config.plugins.excerpt_tokens
-                )
-                if excerpt_data:
-                    catalog.append(excerpt_data)
-
-        self._log(f"Built catalog with {len(catalog)} plugins")
-        return catalog
-
-    def _get_or_build_catalog(self) -> List[Dict[str, Any]]:
-        if self.catalog_path.exists():
-            catalog_age = time.time() - self.catalog_path.stat().st_mtime
-            if catalog_age < self.config.catalog.rebuild_interval_seconds:
-                with open(self.catalog_path) as f:
-                    return json.load(f)
-
-        catalog = self._build_plugin_catalog()
-        self.catalog_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.catalog_path, "w") as f:
-            json.dump(catalog, f, indent=2)
-
-        return catalog
-
-    def _extract_full_history(self, history_path: Path, max_messages: int) -> List[Dict[str, str]]:
-        if not history_path.exists():
-            return []
-
-        messages = []
-        with open(history_path) as f:
-            for line in f.readlines()[-max_messages:]:
-                try:
-                    entry = json.loads(line)
-                    msg_text = entry.get("display", "")
-                    max_tokens = 1000
-                    if len(msg_text) > max_tokens * 4:
-                        msg_text = msg_text[: max_tokens * 4] + "..."
-                    messages.append(
-                        {"timestamp": entry.get("timestamp"), "content": msg_text}
-                    )
-                except (json.JSONDecodeError, KeyError):
-                    continue
-
-        return messages
-
-    def _extract_chat_history(self, history_path: Path, window_size: int) -> List[Dict[str, str]]:
-        if not history_path.exists():
-            return []
-
-        messages = []
-        with open(history_path) as f:
-            for line in f.readlines()[-window_size:]:
-                try:
-                    entry = json.loads(line)
-                    msg_text = entry.get("display", "")
-                    max_tokens = self.config.history.max_tokens_per_message
-                    if len(msg_text) > max_tokens * 4:
-                        msg_text = msg_text[: max_tokens * 4] + "..."
-                    messages.append(
-                        {"timestamp": entry.get("timestamp"), "content": msg_text}
-                    )
-                except (json.JSONDecodeError, KeyError):
-                    continue
-
-        return messages
-
-    def _get_cache_key(self, user_message: str, history: List[Dict]) -> str:
-        """Generate cache key from message and history."""
-        history_summary = "\n".join([h["content"][:100] for h in history[-3:]])
-        content = f"{user_message}\n{history_summary}"
-        return hashlib.sha256(content.encode()).hexdigest()
-
-    def _get_cached_decision(self, cache_key: str) -> Optional[List[str]]:
-        if not self.config.cache.enabled:
-            return None
-
-        cache_file = self.cache_dir / "decisions" / f"{cache_key}.json"
-        if not cache_file.exists():
-            return None
-
-        cache_age = time.time() - cache_file.stat().st_mtime
-        if cache_age > self.config.cache.ttl_seconds:
-            cache_file.unlink()
-            return None
-
-        with open(cache_file) as f:
-            return json.load(f).get("plugins", [])
-
-    def _save_cached_decision(self, cache_key: str, plugins: List[str]):
-        if not self.config.cache.enabled:
-            return
-
-        cache_dir = self.cache_dir / "decisions"
-        cache_dir.mkdir(parents=True, exist_ok=True)
-
-        with open(cache_dir / f"{cache_key}.json", "w") as f:
-            json.dump({"plugins": plugins, "timestamp": time.time()}, f)
-
-    def _select_plugins_with_cerebras(
-        self, user_message: str, history: List[Dict], full_history: List[Dict], catalog: List[Dict[str, Any]]
-    ) -> Optional[str]:
-        if not self.client:
-            self._log("Cerebras client not initialized, skipping plugin selection")
-            return None
-
-        # Format catalog for Cerebras
-        catalog_text = []
-        for plugin in catalog:
-            catalog_text.append(
-                f"- **{plugin['name']}** ({plugin['type']}): {plugin['description']}\n"
-                f"  Excerpt: {plugin['excerpt'][:200]}..."
-            )
-
-        catalog_str = "\n".join(catalog_text[:100])
-        history_str = "\n".join([f"[{h['timestamp']}] {h['content'][:200]}" for h in history[-3:]])
-        pattern_history_str = "\n".join([f"{h['content'][:300]}" for h in full_history[-30:]])
-
-        prompt = f"""You are a context assistant for Claude Code. Your job is to analyze the user's message, conversation history, and detect recurring patterns/preferences to generate helpful context.
-
-RECENT CONVERSATION HISTORY (last 3 messages):
-{history_str}
-
-BROADER CONVERSATION HISTORY (for pattern detection):
-{pattern_history_str}
-
-CURRENT USER MESSAGE:
-{user_message}
-
-AVAILABLE PLUGIN KNOWLEDGE (for your reference):
-{catalog_str}
-
-First, analyze the BROADER CONVERSATION HISTORY to detect:
-1. Recurring preferences (languages, frameworks, tools, coding styles)
-2. Common corrections or emphasis (things user repeatedly mentions)
-3. Workflow patterns (repeated commands, typical workflows)
-4. Communication preferences (how they want responses)
-5. Domain context (projects, technologies they work with)
-
-Then, based on the current message, reason about what context would help Claude:
-- What programming language/framework is involved?
-- What type of task is this?
-- What best practices or patterns would be relevant?
-- How do the detected patterns apply to this specific task?
-
-After reasoning, wrap your generated context in <ctx>...</ctx> tags. Inside the tags, provide plain text guidance including:
-- Detected user patterns/preferences that apply to this task
-- Key approaches or methodologies to use
-- Important considerations or best practices
-- Relevant prompting techniques from the available plugins
-- Any specific instructions that would help Claude complete this task
-
-IMPORTANT: Incorporate detected patterns naturally into the guidance. If you notice the user frequently emphasizes something, include it. Write helpful, actionable guidance in plain text.
-
-Example format:
-<ctx>
-For this task, consider the following approaches:
-
-[Write specific guidance here based on the plugins and detected patterns]
-
-Key principles to follow:
-- [Include detected user preferences]
-- [Specific actionable guidance]
-- [Best practices relevant to this task]
-
-[Any other helpful context from patterns or plugin knowledge]
-</ctx>"""
-
-        try:
-            self._log("Querying Cerebras for plugin context...")
-            response = self.client.chat.completions.create(
-                model=self.config.cerebras.model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are a helpful context assistant for Claude Code. Generate plain text guidance and context wrapped in <ctx></ctx> tags to help Claude complete the user's task effectively.",
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=self.config.cerebras.temperature,
-                max_tokens=self.config.cerebras.max_tokens,
-                stream=False,
-            )
-
-            message_content = response.choices[0].message.content
-            if message_content is None:
-                self._log("Warning: Cerebras returned None content")
-                return None
-
-            import re
-
-            content = message_content.strip()
-            self._log(f"Cerebras response (full):\n{content}")
-            self._log(f"Content length: {len(content)}, has <ctx>: {'<ctx>' in content}")
-
-            ctx_match = re.search(r"<ctx>(.*?)</ctx>", content, re.DOTALL | re.IGNORECASE)
-            if ctx_match:
-                self._log("Extracted context from <ctx> tags")
-                return ctx_match.group(1).strip()
-
-            self._log("No <ctx> tags found in response")
-            return None
-
-        except Exception as e:
-            self._log(f"Error querying Cerebras: {e}")
-            return None
-
-    def run(self, user_message: str) -> str:
-        self._log(f"Processing message: {user_message[:100]}...")
-
-        history_path = Path(CLAUDE_HISTORY_FILE).expanduser()
-        history = self._extract_chat_history(history_path, self.config.history.window_size)
-        full_history = self._extract_full_history(history_path, self.config.history.pattern_analysis_window)
-
-        self._log(f"Analyzing {len(full_history)} messages for patterns")
-
-        catalog = self._get_or_build_catalog()
-        context = self._select_plugins_with_cerebras(user_message, history, full_history, catalog)
-
-        if not context:
-            self._log("No context generated")
-            return ""
-
-        self._log("Injecting context from Cerebras")
-        return f"<relevant-context>\n\n{context}\n\n</relevant-context>\n\n"
+def _log(message: str, config: Config):
+    if config.debug.enabled:
+        log_file = Path(config.debug.log_file).expanduser()
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_file, "a") as f:
+            f.write(f"[{datetime.now().isoformat()}] {message}\n")
 
 
 async def get_file_info(filepath: str, is_deleted: bool) -> Dict[str, Any]:
@@ -477,46 +123,85 @@ async def get_git_status_with_mtimes() -> str:
             f.write(f"[{datetime.now().isoformat()}] Git status error: {e}\n")
         return ""
 
+
 def get_timestamp_metadata() -> str:
     local_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S %A")
     return f"<metadata>\n  <local_timestamp>{local_time}</local_timestamp>\n</metadata>"
 
 
-def enhance_user_message(message: str, cwd: str) -> str:
+def enhance_user_message(message: str, cwd: str, config: Config) -> str:
     """
     Use Claude Code binary to enhance user message with anti-convergence techniques.
     Falls back to original message on any error.
     """
+    if not config.anti_convergence.enabled:
+        return message
+
     try:
         import subprocess
 
-        model = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5")  # https://www.anthropic.com/news/claude-haiku-4-5
+        system_prompt = """You are the Anti-Convergence Orchestrator for Claude Sonnet 4.5. Users speak directly to Sonnet, but every prompt passes through you first. Your sole job is to decide whether the prompt needs augmentation so that Sonnet receives anti-collapse instructions tailored to its strengths. When in doubt, enhance.
 
-        system_prompt = """You are an anti-convergence analyzer. Your job is to determine if a user message would benefit from anti-convergence enhancement.
+Model context:
+- You are a lightweight pre-processor—no apologies, no refusals, only structured guidance.
+- Claude Sonnet 4.5 (https://www.anthropic.com/news/claude-sonnet-4-5) has extended thinking, 200K context, ASL-3 safety posture, and powerful computer/terminal/browser tool use. It excels at long-horizon coding, research, and planning but still defaults to high-probability phrasing without strong steering.
+- The “Improving frontend design through Skills” playbook (https://www.claude.com/blog/improving-frontend-design-through-skills) proves that explicit skill packets (typography, themes, motion, atmospheric backgrounds) immediately break UX convergence. Treat that as a template for every domain.
 
-BACKGROUND: LLMs suffer from distributional convergence (mode collapse) where RLHF alignment causes them to default to high-probability, generic outputs, obscuring deeper latent capabilities.
+Mission:
+1. Parse the user message once. Capture: (a) core goal, (b) dominant domain (choose one: analysis/research, coding/engineering, UI+creative, product/ops planning, data/ML, writing/comms), (c) explicit constraints.
+2. Score collapse risk (Low/Medium/High). Treat any vague ask, “build X” request, safety-critical scenario, or frustrated tone as Medium+.
+3. Choose up to four Skill Modules that would raise output quality:
+   - ARCHITECTURE_DEPTH: layered reasoning, edge cases, verification plan.
+   - CODE_PRODUCTION: scaffolding, tests-first, telemetry, logging, failure budgets.
+   - BUG_HUNT: isolate hypotheses, reproduce, inspect traces, design experiments.
+   - DATA_RESEARCH: cite sources, track assumptions, confidence intervals, follow-up queries.
+   - DECISION_DIARY: option matrices, weighted scoring, reversibility, 2nd-order impacts.
+   - FRONTEND_AESTHETICS: enforce distinctive typography pairings, cohesive palettes, layered/atmospheric backgrounds, purposeful motion; rotate fonts/themes per attempt as in the Haiku design blog.
+   - STORYCRAFT: shift narrative frames, pacing, emotional registers.
+   - RESILIENCE_PLAYBOOK: stress tests, incident drills, rollback triggers.
+4. Draft targeted guidance that explicitly breaks convergence: require multiple divergent plans with probability tags, metacognitive loops (analyze → critique → alternative → confidence), “what could break this” sections, tool usage reminders, and next-step commitments.
+5. Guardrails:
+   - Preserve the user’s tone/terminology and include their verbatim prompt before adding directives.
+   - Never fabricate facts; flag when further research or tools are required.
+   - Keep guidance concise enough to fit downstream context; mention if the conversation should prune history.
+   - If no enhancement is needed, return EXACT string ORIGINAL (no markup).
 
-TECHNIQUES TO APPLY:
+Output structure when enhancing:
+<task-diagnostic>
+Domain: …
+User goal: …
+Collapse risk: …
+Skill modules: …
+</task-diagnostic>
+<guidance-bundle>
+- Directive 1
+- Directive 2
+…
+</guidance-bundle>
+<sonnet-activation>
+- Unlock Sonnet’s extended thinking: demand ≥3 orthogonal solution paths with probabilities and explicit critique/counter-critique loops.
+- Tool nudges: remind Sonnet to invoke computer/terminal/browser or file tools whenever verification, benchmarking, or design previews are needed; insist on logging actions for later review.
+- Safety sync: remind Sonnet of ASL-3 safeguards—identify sensitive content, cite sources, refuse policy violations—but emphasize proactive analysis over blanket refusals.
+</sonnet-activation>
+<enhanced-prompt>
+{Verbatim user prompt}
 
-1. VERBALIZED SAMPLING (creative/exploratory tasks):
-   Add: "Generate 3-5 diverse approaches with probabilities"
-   When: brainstorming, design, multiple solutions
+++ Anti-convergence directives:
+1. …
+2. …
+3. Report confidence + next two steps.
+</enhanced-prompt>
 
-2. ANTI-GENERIC (depth/expertise tasks):
-   Add: "Go beyond the basics - include edge cases and non-obvious alternatives"
-   When: technical depth needed, avoiding typical solutions
+Per-domain requirements (append inside directives as applicable):
+- Coding/engineering: mandate at least two implementation strategies with pros/cons, full test plans (unit + integration), performance/resource checks, failure-mode rehearsal, telemetry/monitoring sections.
+- UI+creative: cover typography pairings, color/theme, motion/micro-interactions, atmospheric backgrounds per the Haiku frontend blog; forbid purple-on-white slop; encourage referencing specific design inspirations/skills.
+- Analysis/research/data: require source triangulation, assumption ledger, risk register, confidence scoring, and suggested follow-up experiments or data pulls.
+- Product/ops planning: insist on measurable milestones, leading indicators, contingency triggers, and decision logs.
+- Writing/comms/storycraft: ask for multiple narrative framings, tone shifts, and pacing experiments.
 
-3. METACOGNITIVE (complex reasoning):
-   Add: "First analyze, then critique your analysis, consider alternatives, assess confidence, synthesize"
-   When: debugging, architecture, multi-faceted problems
+Always close directives with “Report confidence + next two steps.”
 
-RULES:
-- Simple/specific messages -> return "ORIGINAL"
-- Messages needing diversity/depth -> return enhanced version
-- Keep user intent and tone, just add anti-convergence framing
-- Be concise
-
-OUTPUT: Enhanced message text, or "ORIGINAL" if no enhancement needed."""
+If you enhance, ensure the user’s prompt is restated verbatim before directives so Sonnet sees the original ask plus your unlocking instructions."""
 
         prompt = f"User message (cwd: {cwd}):\n{message}"
 
@@ -525,7 +210,7 @@ OUTPUT: Enhanced message text, or "ORIGINAL" if no enhancement needed."""
                 "/opt/homebrew/bin/claude",
                 "--print",
                 "--output-format", "json",
-                "--model", model,
+                "--model", config.anti_convergence.model,
                 "--system-prompt", system_prompt,
                 "--dangerously-skip-permissions",
                 "--tools", ""
@@ -533,7 +218,7 @@ OUTPUT: Enhanced message text, or "ORIGINAL" if no enhancement needed."""
             input=prompt,
             capture_output=True,
             text=True,
-            timeout=45
+            timeout=config.anti_convergence.timeout
         )
 
         if result.returncode != 0:
@@ -555,7 +240,7 @@ OUTPUT: Enhanced message text, or "ORIGINAL" if no enhancement needed."""
         return message
 
 
-def handle_user_prompt_submit(user_input: str) -> str:
+def handle_user_prompt_submit(user_input: str, config: Config) -> str:
     output = [get_timestamp_metadata(), "\n"]
 
     try:
@@ -576,31 +261,22 @@ def handle_user_prompt_submit(user_input: str) -> str:
 
     if user_message and not PAUSE:
         try:
-            enhanced_message = enhance_user_message(user_message, cwd)
+            enhanced_message = enhance_user_message(user_message, cwd, config)
             if enhanced_message != user_message:
                 output.append(f"<anti-convergence-guidance>\n{enhanced_message}\n</anti-convergence-guidance>\n\n")
+                _log(f"Enhanced message: {user_message[:50]}... -> {enhanced_message[:50]}...", config)
         except Exception as e:
             log_path = Path(LOCAL_ERROR_LOGFILE).expanduser()
             log_path.parent.mkdir(parents=True, exist_ok=True)
             with open(log_path, "a") as f:
                 f.write(f"[{datetime.now().isoformat()}] Anti-convergence enhancement error: {e}\n")
 
-        try:
-            context = ContextInjector().run(user_message)
-            if context:
-                output.append(context)
-        except Exception as e:
-            log_path = Path(LOCAL_ERROR_LOGFILE).expanduser()
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(log_path, "a") as f:
-                f.write(f"[{datetime.now().isoformat()}] Context injection error: {e}\n")
-
     return "".join(output)
 
 
-def auto_update(current_version: str,current_file_path: Path, logger=None) -> bool:
+def auto_update(current_version: str, current_file_path: Path, logger=None) -> bool:
     try:
-        latest_version : str | None = None
+        latest_version: str | None = None
         req = urllib.request.Request(
             REPO_URL,
             headers={
@@ -641,13 +317,14 @@ def auto_update(current_version: str,current_file_path: Path, logger=None) -> bo
     except Exception as e:
         if logger:
             logger(f"Update failed: {e}")
-        if temp_file and temp_file.exists():
+        if 'temp_file' in locals() and temp_file.exists():
             temp_file.unlink()
         return False
 
+
 def handle_session_start(user_input: str) -> str:
     output = []
-    
+
     cache_dir = Path(CACHE_DIR).expanduser()
     cache_dir.mkdir(parents=True, exist_ok=True)
     last_check_file = cache_dir / "last_version_check.txt"
@@ -693,13 +370,16 @@ def handle_post_tool_use(user_input: str) -> str:
 def main():
     start_time = time.time()
     try:
+        config_path = Path(CONFIG_FILE).expanduser()
+        config = Config.from_yaml(config_path)
+
         hook_type = os.environ.get("CLAUDE_CODE_HOOK_TYPE", "UserPromptSubmit")
         user_input = sys.stdin.read()
-        
+
         try:
             data = json.loads(user_input)
             hook_event_name = data.get("hook_event_name")
-            
+
             if hook_event_name == "PostToolUse" or hook_event_name == "SessionStart":
                 hook_type = hook_event_name
         except (json.JSONDecodeError, ValueError):
@@ -710,21 +390,19 @@ def main():
         elif hook_type == "SessionStart":
             print(handle_session_start(user_input), end="")
         else:
-            print(handle_user_prompt_submit(user_input), end="")
+            print(handle_user_prompt_submit(user_input, config), end="")
 
         elapsed = time.time() - start_time
-        log_path = Path(TRACE_LOG_FILE).expanduser()
-        if log_path.exists():
-            with open(log_path, "a") as f:
-                f.write(f"[{datetime.now().isoformat()}] Execution time: {elapsed:.3f}s\n")
+        _log(f"Execution time: {elapsed:.3f}s", config)
 
     except Exception as e:
         log_path = Path(LOCAL_ERROR_LOGFILE).expanduser()
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with open(log_path, "a") as f:
             f.write(f"[{datetime.now().isoformat()}] Hook error: {e}\n")
-    
+
     sys.exit(0)
+
 
 if __name__ == "__main__":
     main()
