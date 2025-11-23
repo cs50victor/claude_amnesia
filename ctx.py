@@ -250,8 +250,7 @@ def handle_user_prompt_submit(user_input: str, config: Config) -> str:
     output = [get_timestamp_metadata(), "\n"]
 
     try:
-        git_status = asyncio.run(get_git_status_with_mtimes())
-        if git_status:
+        if git_status := asyncio.run(get_git_status_with_mtimes()):
             output.append(git_status)
             output.append("\n")
     except Exception:
@@ -261,7 +260,9 @@ def handle_user_prompt_submit(user_input: str, config: Config) -> str:
         hook_data = json.loads(user_input)
         user_message = hook_data.get("prompt", "")
         cwd = hook_data.get("cwd", os.getcwd())
-        _log(f"Parsed JSON: user_message='{user_message[:100]}'", config)
+        msg = f"Parsed JSON: user_message='{user_message[:100]}'"
+        _log(msg, config)
+        output.append(msg)
     except (json.JSONDecodeError, ValueError):
         user_message = user_input
         cwd = os.getcwd()
@@ -272,7 +273,7 @@ def handle_user_prompt_submit(user_input: str, config: Config) -> str:
         try:
             enhanced_message = enhance_user_message(user_message, cwd, config)
             _log(f"Enhancement returned {len(enhanced_message)} chars", config)
-            output.append(f"<anti-convergence-guidance>\n{enhanced_message}\n</anti-convergence-guidance>\n\n")
+            # output.append(f"<anti-convergence-guidance>\n{enhanced_message}\n</anti-convergence-guidance>\n\n")
             _log(f"Enhanced message: {user_message[:50]}... -> {enhanced_message[:50]}...", config)
         except Exception as e:
             _log(f"Enhancement failed: {e}", config)
@@ -283,6 +284,7 @@ def handle_user_prompt_submit(user_input: str, config: Config) -> str:
     else:
         _log(f"Skipping enhancement: user_message={bool(user_message)}, PAUSE={PAUSE}", config)
 
+    return "".join(output)
     result = "".join(output)
     _log(f"Hook returning {len(result)} characters", config)
     _log(f"Hook output preview: {result[:200]}...", config)
