@@ -273,7 +273,10 @@ def handle_user_prompt_submit(user_input: str, config: Config) -> str:
             with open(log_path, "a") as f:
                 f.write(f"[{datetime.now().isoformat()}] Anti-convergence enhancement error: {e}\n")
 
-    return "".join(output)
+    result = "".join(output)
+    _log(f"Hook returning {len(result)} characters", config)
+    _log(f"Hook output preview: {result[:200]}...", config)
+    return result
 
 
 def auto_update(current_version: str, current_file_path: Path, logger=None) -> bool:
