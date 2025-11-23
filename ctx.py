@@ -38,7 +38,7 @@ AUTO_UPDATE_INTERVAL = 86400
 
 class AntiConvergenceConfig(BaseModel):
     model: str = Field(default="claude-haiku-4-5")
-    timeout: int = Field(default=45)
+    timeout: int = Field(default=120)
     enabled: bool = Field(default=True)
 
 
