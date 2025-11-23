@@ -18,7 +18,7 @@ import sys
 import time
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 from datetime import datetime
 
 import yaml
@@ -128,6 +128,105 @@ async def get_git_status_with_mtimes() -> str:
 def get_timestamp_metadata() -> str:
     local_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S %A")
     return f"<metadata>\n  <local_timestamp>{local_time}</local_timestamp>\n</metadata>"
+
+
+def _parse_frontmatter(text: str) -> Dict[str, str]:
+    if not text.startswith("---"):
+        return {}
+
+    closing_index = text.find("\n---", 3)
+    if closing_index == -1:
+        return {}
+
+    block = text[3:closing_index]
+    data: Dict[str, str] = {}
+    for line in block.splitlines():
+        if not line.strip() or line.strip().startswith("#"):
+            continue
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        data[key.strip()] = value.strip()
+    return data
+
+
+def _discover_command_dirs(cwd: str) -> List[Path]:
+    dirs: List[Path] = []
+    seen: set[str] = set()
+
+    def add_directory(path: Path):
+        resolved = str(path.resolve()) if path.exists() else str(path)
+        if path.is_dir() and resolved not in seen:
+            dirs.append(path)
+            seen.add(resolved)
+
+    global_commands = Path("~/.claude/commands").expanduser()
+    add_directory(global_commands)
+
+    local_commands = Path(cwd).expanduser() / ".claude" / "commands"
+    add_directory(local_commands)
+
+    claude_root = Path("~/.claude").expanduser()
+    if claude_root.is_dir():
+        for child in claude_root.iterdir():
+            if child.is_dir():
+                add_directory(child / "commands")
+
+    extra_paths = os.getenv("CLAUDE_COMMAND_PATHS", "")
+    if extra_paths:
+        for entry in extra_paths.split(os.pathsep):
+            if not entry:
+                continue
+            add_directory(Path(entry).expanduser())
+
+    return dirs
+
+
+def load_command_metadata(cwd: str) -> List[Dict[str, str]]:
+    commands: List[Dict[str, str]] = []
+    seen_names: set[str] = set()
+
+    for directory in _discover_command_dirs(cwd):
+        if not directory.is_dir():
+            continue
+        try:
+            files = sorted(directory.glob("*.md"))
+        except OSError:
+            continue
+
+        for file_path in files:
+            name = file_path.stem
+            if not name or name in seen_names:
+                continue
+            try:
+                text = file_path.read_text()
+            except (OSError, UnicodeDecodeError):
+                continue
+
+            metadata = _parse_frontmatter(text)
+            description = metadata.get("description", "")
+            commands.append(
+                {
+                    "name": name,
+                    "description": description,
+                }
+            )
+            seen_names.add(name)
+
+    return commands
+
+
+def detect_slash_command(user_message: str, cwd: str) -> str | None:
+    trimmed = user_message.strip()
+    if not trimmed.startswith("/") or len(trimmed) <= 1:
+        return None
+
+    commands = load_command_metadata(cwd)
+    for cmd in commands:
+        if trimmed == f"/{cmd['name']}":
+            return cmd["name"]
+
+    return None
 
 
 def enhance_user_message(message: str, cwd: str, config: Config) -> str:
@@ -263,6 +362,21 @@ def handle_user_prompt_submit(user_input: str, config: Config) -> str:
         user_message = user_input
         cwd = os.getcwd()
         _log(f"Not JSON, using raw input: '{user_message[:100]}'", config)
+
+    slash_command: str | None = None
+    if user_message:
+        try:
+            slash_command = detect_slash_command(user_message, cwd)
+            if slash_command:
+                _log(f"Detected slash command: /{slash_command}", config)
+        except Exception as e:
+            _log(f"Slash command detection failed: {e}", config)
+
+    if slash_command:
+        result = "".join(output)
+        _log("Returning early for slash command", config)
+        _log(f"Hook output preview: {result[:200]}...", config)
+        return result
 
     if user_message and not PAUSE:
         try:
