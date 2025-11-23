@@ -253,6 +253,7 @@ def handle_user_prompt_submit(user_input: str, config: Config) -> str:
         if git_status := asyncio.run(get_git_status_with_mtimes()):
             output.append(git_status)
             output.append("\n")
+            return "".join(output)
     except Exception:
         pass
 
