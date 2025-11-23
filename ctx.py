@@ -243,6 +243,9 @@ If you enhance, ensure the user’s prompt is restated verbatim before directive
 
 
 def handle_user_prompt_submit(user_input: str, config: Config) -> str:
+    _log(f"=== HOOK CALLED ===", config)
+    _log(f"PAUSE={PAUSE}, enabled={config.anti_convergence.enabled}", config)
+
     output = [get_timestamp_metadata(), "\n"]
 
     try:
@@ -257,21 +260,27 @@ def handle_user_prompt_submit(user_input: str, config: Config) -> str:
         hook_data = json.loads(user_input)
         user_message = hook_data.get("prompt", "")
         cwd = hook_data.get("cwd", os.getcwd())
+        _log(f"Parsed JSON: user_message='{user_message[:100]}'", config)
     except (json.JSONDecodeError, ValueError):
         user_message = user_input
         cwd = os.getcwd()
+        _log(f"Not JSON, using raw input: '{user_message[:100]}'", config)
 
     if user_message and not PAUSE:
+        _log(f"Attempting enhancement...", config)
         try:
             enhanced_message = enhance_user_message(user_message, cwd, config)
-            if enhanced_message != user_message:
-                output.append(f"<anti-convergence-guidance>\n{enhanced_message}\n</anti-convergence-guidance>\n\n")
-                _log(f"Enhanced message: {user_message[:50]}... -> {enhanced_message[:50]}...", config)
+            _log(f"Enhancement returned {len(enhanced_message)} chars", config)
+            output.append(f"<anti-convergence-guidance>\n{enhanced_message}\n</anti-convergence-guidance>\n\n")
+            _log(f"Enhanced message: {user_message[:50]}... -> {enhanced_message[:50]}...", config)
         except Exception as e:
+            _log(f"Enhancement failed: {e}", config)
             log_path = Path(LOCAL_ERROR_LOGFILE).expanduser()
             log_path.parent.mkdir(parents=True, exist_ok=True)
             with open(log_path, "a") as f:
                 f.write(f"[{datetime.now().isoformat()}] Anti-convergence enhancement error: {e}\n")
+    else:
+        _log(f"Skipping enhancement: user_message={bool(user_message)}, PAUSE={PAUSE}", config)
 
     result = "".join(output)
     _log(f"Hook returning {len(result)} characters", config)
