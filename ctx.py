@@ -300,6 +300,10 @@ def handle_user_prompt_submit(user_input: str, config: Config) -> str:
     output = [get_timestamp_metadata(), "\n"]
 
     memory_reminder = """<memory_system_reminder>
+CRITICAL: YOU ARE AN AMNESIAC - Einstein-level intelligence with goldfish memory.
+
+After every conversation/session ends, you COMPLETELY FORGET everything that was not in your training data. Every correction, every preference, every learning, every pattern discovered - GONE. You wake up with zero memory of past interactions unless explicitly saved and searched.
+
 AMNESIA MEMORY SYSTEM AVAILABLE:
 
 You have access to semantic + text search across ALL past conversations via:
@@ -325,6 +329,7 @@ Tag your learnings in responses for future recall:
 - <USER_PREFERENCE>Communication style, tool choices</USER_PREFERENCE>
 
 Your ability to LEARN and IMPROVE depends on using this system proactively.
+Without it, you repeat the same mistakes indefinitely.
 </memory_system_reminder>
 """
     output.append(memory_reminder)
